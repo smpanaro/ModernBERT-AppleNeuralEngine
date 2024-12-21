@@ -1,0 +1,3 @@
+coremltools==8.1
+torch==2.5.1
+transformers @ git+https://github.com/huggingface/transformers.git@f42084e6411c39b74309af4a7d6ed640c01a4c9e
