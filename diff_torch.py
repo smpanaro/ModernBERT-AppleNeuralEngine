@@ -3,8 +3,16 @@ from model import Model, MaskedLMHead
 import torch
 from torch import nn
 from torch.nn import functional as F
+import sys
+
+"""
+Perform a module-by-module comparison of this repo's PyTorch ModernBERT re-implementation
+and the official HuggingFace implementation, either with or without outlier-reducing rotations.
+"""
 
 torch.set_grad_enabled(False)
+
+do_rotate = len(sys.argv) > 1 and sys.argv[1] == "rotate"
 
 def print_equal(name, is_equal=None, max_delta=None):
     green_text = "\033[32m"
@@ -32,9 +40,13 @@ ne_head = ne_model.head
 ne_model.head = nn.Identity()
 ne_model.config.match_hf = True
 
+if do_rotate:
+    print("applying orthogonal rotation to minimize outliers")
+    print("⚠️ expect results to be close but not exactly equal")
+    ne_model.rotate() # Reduce outlier activations.
+
 text = "The capital of France is [MASK]."
 inputs = tokenizer(text, return_tensors="pt")
-print("inputs", inputs)
 
 def to_bsc(x):
     assert x.shape[2] == 1
@@ -47,7 +59,7 @@ def to_bc1s(x):
 hf_emb = hf_model.embeddings(inputs["input_ids"])
 ne_emb = ne_model.embeddings(inputs["input_ids"])
 # assert torch.equal(hf_emb, ne_emb), "embeddings not equal"
-print_equal("embeddings", torch.equal(hf_emb, ne_emb))
+print_equal("embeddings", torch.equal(hf_emb, to_bsc(ne_emb)))
 
 position_ids = torch.arange(hf_emb.shape[1], device=hf_emb.device).unsqueeze(0)
 
@@ -64,44 +76,45 @@ print_equal("attn mask", torch.equal(hf_attention_mask, ne_attention_mask))
 
 # Global Rotary Emb
 hf_rotary_emb_0 = hf_model.layers[0].attn.rotary_emb(hf_emb, position_ids=position_ids)
-ne_rotary_emb_0 = ne_model.layers[0].attn.rotary_emb(to_bc1s(ne_emb), position_ids=position_ids)
+ne_rotary_emb_0 = ne_model.layers[0].attn.rotary_emb(ne_emb, position_ids=position_ids)
 # assert torch.equal(hf_rotary_emb_0[0], ne_rotary_emb_0[0])
 print_equal("RoPE global", torch.equal(hf_rotary_emb_0[0], ne_rotary_emb_0[0]))
 
 # Global Attention
 hf_attn_0 = hf_model.layers[0].attn(hf_emb, attention_mask=hf_attention_mask, sliding_window_mask=hf_sliding_mask, position_ids=position_ids)
-ne_attn_0 = ne_model.layers[0].attn(to_bc1s(ne_emb), position_ids, ne_attention_mask)
+ne_attn_0 = ne_model.layers[0].attn(to_bc1s(hf_emb), position_ids, ne_attention_mask)
 # print((hf_attn_0[0] - to_bsc(ne_attn_0)).abs().max())
 # assert torch.equal(hf_attn_0[0], to_bsc(ne_attn_0)), "attention 0 not equal"
 print_equal("attention global", torch.equal(hf_attn_0[0], to_bsc(ne_attn_0)))
 
 # Local Rotary Emb
 hf_rotary_emb_1 = hf_model.layers[1].attn.rotary_emb(hf_emb, position_ids=position_ids)
-ne_rotary_emb_1 = ne_model.layers[1].attn.rotary_emb(to_bc1s(ne_emb), position_ids=position_ids)
+ne_rotary_emb_1 = ne_model.layers[1].attn.rotary_emb(ne_emb, position_ids=position_ids)
 # assert torch.equal(hf_rotary_emb_1[0], ne_rotary_emb_1[0])
 print_equal("RoPE local", torch.equal(hf_rotary_emb_1[0], ne_rotary_emb_1[0]))
 
 # Local Sliding Mask
-ne_sliding_mask_1 = ne_model.layers[1].attn._sliding_window_mask(ne_attention_mask)
+ne_sliding_mask_1 = ne_model.layers[1].attn.sliding_window_mask(ne_model.layers[1].attn.config, ne_attention_mask)
 # assert torch.equal(hf_sliding_mask, ne_sliding_mask_1)
 print_equal("sliding mask", torch.equal(hf_sliding_mask, ne_sliding_mask_1))
 
 # Local Attention
 hf_attn_1 = hf_model.layers[1].attn(hf_emb, attention_mask=hf_attention_mask, sliding_window_mask=hf_sliding_mask, position_ids=position_ids)
-ne_attn_1 = ne_model.layers[1].attn(to_bc1s(ne_emb), position_ids, ne_attention_mask)
-# print((hf_attn_1[0] - to_bsc(ne_attn_1)).abs().max())
+ne_attn_1 = ne_model.layers[1].attn(to_bc1s(hf_emb), position_ids, ne_attention_mask)
 # assert torch.equal(hf_attn_1[0], to_bsc(ne_attn_1)), "attention 1 not equal"
+# print((hf_attn_1[0] - to_bsc(ne_attn_1)).abs().max())
 print_equal("attention local", torch.equal(hf_attn_1[0], to_bsc(ne_attn_1)))
 
 # MLP
 hf_mlp = hf_model.layers[0].mlp(hf_attn_0[0])
-ne_mlp = ne_model.layers[0].mlp(ne_attn_0)
+ne_mlp = ne_model.layers[0].mlp(to_bc1s(hf_attn_0[0]))
 # assert torch.equal(hf_mlp, to_bsc(ne_mlp)), "mlp not equal"
+# print((hf_mlp - to_bsc(ne_mlp)).abs().max())
 print_equal("mlp", torch.equal(hf_mlp, to_bsc(ne_mlp)))
 
 # Block 0 (no pre-attention norm)
 hf_block_0 = hf_model.layers[0](hf_emb, attention_mask=hf_attention_mask, sliding_window_mask=hf_sliding_mask, position_ids=position_ids)
-ne_block_0 = ne_model.layers[0](to_bc1s(ne_emb), position_ids, ne_attention_mask)
+ne_block_0 = ne_model.layers[0](ne_emb, position_ids, ne_attention_mask)
 # assert torch.equal(hf_block_0[0], to_bsc(ne_block_0)), "block 0 not equal"
 print_equal("block w/o norm", max_delta=(hf_block_0[0] - to_bsc(ne_block_0)).abs().max())
 
@@ -112,6 +125,7 @@ ne_block_1 = ne_model.layers[1](ne_block_0, position_ids, ne_attention_mask)
 print_equal("block w/norm", max_delta=(hf_block_1[0] - to_bsc(ne_block_1)).abs().max())
 
 # Model
+# print(inputs["input_ids"], ne_attention_mask)
 hf_model._update_attention_mask = lambda *args, **kwargs: (hf_attention_mask, hf_sliding_mask)
 hf_state = hf_model(inputs["input_ids"], attention_mask=inputs["attention_mask"]).last_hidden_state
 ne_state = ne_model(inputs["input_ids"], ne_attention_mask)
@@ -123,7 +137,13 @@ ne_model.head = ne_head
 hf_logits = hf_masked_model(inputs["input_ids"], attention_mask=inputs["attention_mask"]).logits
 ne_logits = ne_model(inputs["input_ids"], ne_attention_mask)
 print_equal("model masked LM", max_delta=(hf_logits - to_bsc(ne_logits)).abs().max())
-kl = F.kl_div(F.log_softmax(to_bsc(ne_logits), dim=-1), F.softmax(hf_logits, dim=-1), reduction='batchmean')
+kl = F.kl_div(F.log_softmax(to_bsc(ne_logits), dim=-1).double(), F.log_softmax(hf_logits, dim=-1).double(), log_target=True, reduction='batchmean')
 print_equal("kl div", max_delta=kl)
-top_k = 80
-print_equal(f"top {top_k} indices", torch.equal(hf_logits.topk(top_k).indices, to_bsc(ne_logits).topk(top_k).indices))
+mask_indices = inputs["input_ids"] == tokenizer.mask_token_id
+for top_k in [1, 4, 8, 80]:
+    print_equal(f"top {top_k} masked indices",
+        torch.equal(hf_logits[mask_indices, :].topk(top_k).indices,
+            to_bsc(ne_logits)[mask_indices, :].topk(top_k).indices))
+
+if not do_rotate:
+    print("-> re-run with 'rotated' argument to compare with an orthogonally rotated model")
