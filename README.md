@@ -2,9 +2,11 @@
 
 ModernBERT model optimized for Apple Neural Engine.
 
-🏎️ 2.4 TFLOP/s (1024 token input; base model)
-🔋 2.1 W of power (1024 token input; base model)
-🤏 1 file for the model definition (a la nanoGPT)
+> 🏎️ 2.4 TFLOP/s (1024 token input; base model)
+>
+> 🔋 2.1 W of power (1024 token input; base model)
+>
+> 🤏 1 file for the model definition (a la nanoGPT)
 
 # Install
 ```shell
