@@ -23,9 +23,9 @@ text = "The capital of France is [MASK]." if len(sys.argv) == 2 else sys.argv[2]
 
 inputs = tokenizer(text, padding='max_length', max_length=sequence_length, return_tensors="pt")
 first_pad_index = torch.where(inputs["input_ids"] == tokenizer.pad_token_id)[1][0].item()
-mask = torch.zeros((1, 1, sequence_length, sequence_length))
-mask[..., :, first_pad_index:] = -1e4
-mask[..., first_pad_index:, :] = -1e4
+mask = torch.zeros((1, sequence_length, 1, sequence_length))
+mask[:, :, :, first_pad_index:] = -1e4
+mask[:, first_pad_index:, :, :] = -1e4
 
 outputs = model.predict({"input_ids": inputs["input_ids"].int().numpy(), "mask": mask.numpy()})
 logits = list(outputs.values())[0]

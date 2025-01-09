@@ -25,6 +25,7 @@ class Config:
     pad_token_id: int = 50283
     norm_eps: float = 1e-5
     norm_bias: bool = False
+    query_chunk_size: int = 8192
     match_hf: bool = False # Adjust to match HF more closely.
 
 class Embeddings(nn.Module):
@@ -84,26 +85,78 @@ class Attention(nn.Module):
         # Switch between global or local attention as appropriate.
         mask = self._attention_mask(attention_mask, sliding_window_mask)
 
-        attn = self.original_attn(q, k, v, mask, self.config.num_heads, self.dim_head)
+        attn = self.split_einsum_attn(q,k,v, mask, self.config.num_heads, self.dim_head, self.config.query_chunk_size)
         return self.out(attn)
 
     @staticmethod
-    def original_attn(q, k, v, mask, heads, dim_head):
-        bs = q.size(0)
-        mh_q = q.view(bs, heads, dim_head, -1)
-        mh_k = k.view(bs, heads, dim_head, -1)
-        mh_v = v.view(bs, heads, dim_head, -1)
+    def split_einsum_attn(q, k, v, mask, heads, dim_head, query_chunk_size):
+        """Split einsum with query chunking from ml-stable-diffusion (split_einsum_v2)"""
+        query_seq_length = q.size(3)
+        num_chunks = query_seq_length // query_chunk_size
 
-        attn_weights = torch.einsum("bhcq,bhck->bhqk", [mh_q, mh_k])
-        attn_weights.mul_(dim_head**-0.5)
+        if num_chunks == 0:
+            # Without chunking.
+            query_chunk_size = query_seq_length
+            num_chunks = 1
+
+        bs = q.size(0)
+        q = q.view(bs, heads*dim_head, 1, -1)
+        k = k.view(bs, heads*dim_head, 1, -1)
+        v = v.view(bs, heads*dim_head, 1, -1)
+
+        mh_q = [
+            q[:, head_idx * dim_head:(head_idx + 1) *
+            dim_head, :, :] for head_idx in range(heads)
+        ]  # (bs, dim_head, 1, max_seq_length) * heads
+
+        # Chunk the query sequence for each head
+        mh_q_chunked = [
+            [h_q[..., chunk_idx * query_chunk_size:(chunk_idx + 1) * query_chunk_size] for chunk_idx in range(num_chunks)]
+            for h_q in mh_q
+        ]  # ((bs, dim_head, 1, QUERY_SEQ_CHUNK_SIZE) * num_chunks) * heads
+
+        k = k.transpose(1, 3)
+        mh_k = [
+            k[:, :, :,
+            head_idx * dim_head:(head_idx + 1) * dim_head]
+            for head_idx in range(heads)
+        ]  # (bs, max_seq_length, 1, dim_head) * heads
+
+        mh_v = [
+            v[:, head_idx * dim_head:(head_idx + 1) *
+            dim_head, :, :] for head_idx in range(heads)
+        ]  # (bs, dim_head, 1, max_seq_length) * heads
+
+        attn_weights = [
+            [
+                torch.einsum("bchq,bkhc->bkhq", [qi_chunk, ki]) * (dim_head**-0.5)
+                for qi_chunk in h_q_chunked
+            ] for h_q_chunked, ki in zip(mh_q_chunked, mh_k)
+        ]  # ((bs, max_seq_length, 1, chunk_size) * num_chunks) * heads
 
         if mask is not None:
-            attn_weights = attn_weights + mask
+            attn_weights = [
+                [aw_chunk + mask[:, :, :, chunk_idx * query_chunk_size:(chunk_idx + 1) * query_chunk_size] for chunk_idx, aw_chunk in enumerate(aw_chunked)]
+                for aw_chunked in attn_weights
+            ] # ((bs, max_seq_length, 1, chunk_size) * num_chunks) * heads
 
-        attn_weights = attn_weights.softmax(dim=3)
+        attn_weights = [
+            [aw_chunk.softmax(dim=1) for aw_chunk in aw_chunked]
+            for aw_chunked in attn_weights
+        ]  # ((bs, max_seq_length, 1, chunk_size) * num_chunks) * heads
 
-        attn = torch.einsum("bhqk,bhck->bhcq", [attn_weights, mh_v])
-        return attn.contiguous().view(bs, heads * dim_head, 1, -1)
+        attn = [
+            [
+                torch.einsum("bkhq,bchk->bchq", wi_chunk, vi)
+                for wi_chunk in wi_chunked
+            ] for wi_chunked, vi in zip(attn_weights, mh_v)
+        ]  # ((bs, dim_head, 1, chunk_size) * num_chunks) * heads
+
+        attn = torch.cat([
+            torch.cat(attn_chunked, dim=3) for attn_chunked in attn
+        ], dim=1)  # (bs, dim, 1, max_seq_length)
+
+        return attn
 
     def _attention_mask(self, global_attention_mask, precomputed_sliding_mask=None):
         if self.use_global_attention:
@@ -116,13 +169,13 @@ class Attention(nn.Module):
     def sliding_window_mask(config: Config, global_attention_mask, mask_min_value: float = -1e4):
         # TODO: Compute this more efficiently. It's stored as a boolean tensor in CoreML: ~66MB for 8192 sequence length.
         # ~252us on CPU for 512 tokens.
-        seq_length = global_attention_mask.shape[2]
+        seq_length = global_attention_mask.shape[-1]
         position_indices = torch.arange(seq_length).unsqueeze(0)
         distances = torch.abs(position_indices - position_indices.T)
 
         # 1 for positions within window, 0 outside
         window_mask = (
-            (distances <= config.local_attention_window_size // 2).unsqueeze(0).unsqueeze(0).to(global_attention_mask.device)
+            (distances <= config.local_attention_window_size // 2).unsqueeze(0).unsqueeze(2).to(global_attention_mask.device)
         )
 
         sliding_window_mask = global_attention_mask.masked_fill(window_mask.logical_not(), mask_min_value)

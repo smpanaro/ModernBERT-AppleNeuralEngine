@@ -52,3 +52,4 @@ Borrows heavily from:
 - convert core model separately from heads to allow hot-swapping of different heads
 - pack short sequences into single prediction
 - support for heads beyond masked LM
+- enumerated shapes for inputs [see](https://github.com/0seba/ModernBERT-AppleNeuralEngine/commit/46b73ba40fbeb712f1c47b084922190c3058ce29)

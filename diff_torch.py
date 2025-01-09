@@ -73,6 +73,7 @@ ne_attention_mask = torch.zeros((1,1,hf_emb.shape[1], hf_emb.shape[1]))
 ne_attention_mask[..., -1] = ne_model.layers[0].attn.mask_min_value
 # assert torch.equal(hf_attention_mask, ne_attention_mask)
 print_equal("attn mask", torch.equal(hf_attention_mask, ne_attention_mask))
+ne_attention_mask = ne_attention_mask.permute(0,3,1,2) # 11qk -> bk1q
 
 # Global Rotary Emb
 hf_rotary_emb_0 = hf_model.layers[0].attn.rotary_emb(hf_emb, position_ids=position_ids)
@@ -85,7 +86,7 @@ hf_attn_0 = hf_model.layers[0].attn(hf_emb, attention_mask=hf_attention_mask, sl
 ne_attn_0 = ne_model.layers[0].attn(to_bc1s(hf_emb), position_ids, ne_attention_mask)
 # print((hf_attn_0[0] - to_bsc(ne_attn_0)).abs().max())
 # assert torch.equal(hf_attn_0[0], to_bsc(ne_attn_0)), "attention 0 not equal"
-print_equal("attention global", torch.equal(hf_attn_0[0], to_bsc(ne_attn_0)))
+print_equal("attention global", max_delta=(hf_attn_0[0] - to_bsc(ne_attn_0)).abs().max())
 
 # Local Rotary Emb
 hf_rotary_emb_1 = hf_model.layers[1].attn.rotary_emb(hf_emb, position_ids=position_ids)
@@ -96,14 +97,14 @@ print_equal("RoPE local", torch.equal(hf_rotary_emb_1[0], ne_rotary_emb_1[0]))
 # Local Sliding Mask
 ne_sliding_mask_1 = ne_model.layers[1].attn.sliding_window_mask(ne_model.layers[1].attn.config, ne_attention_mask)
 # assert torch.equal(hf_sliding_mask, ne_sliding_mask_1)
-print_equal("sliding mask", torch.equal(hf_sliding_mask, ne_sliding_mask_1))
+print_equal("sliding mask", torch.equal(hf_sliding_mask, ne_sliding_mask_1.permute(0,2,3,1)))
 
 # Local Attention
 hf_attn_1 = hf_model.layers[1].attn(hf_emb, attention_mask=hf_attention_mask, sliding_window_mask=hf_sliding_mask, position_ids=position_ids)
 ne_attn_1 = ne_model.layers[1].attn(to_bc1s(hf_emb), position_ids, ne_attention_mask)
 # assert torch.equal(hf_attn_1[0], to_bsc(ne_attn_1)), "attention 1 not equal"
 # print((hf_attn_1[0] - to_bsc(ne_attn_1)).abs().max())
-print_equal("attention local", torch.equal(hf_attn_1[0], to_bsc(ne_attn_1)))
+print_equal("attention local", max_delta=(hf_attn_1[0] - to_bsc(ne_attn_1)).abs().max())
 
 # MLP
 hf_mlp = hf_model.layers[0].mlp(hf_attn_0[0])
@@ -146,4 +147,4 @@ for top_k in [1, 4, 8, 80]:
             to_bsc(ne_logits)[mask_indices, :].topk(top_k).indices))
 
 if not do_rotate:
-    print("-> re-run with 'rotated' argument to compare with an orthogonally rotated model")
+    print("-> re-run with 'rotate' argument to compare with an orthogonally rotated model")

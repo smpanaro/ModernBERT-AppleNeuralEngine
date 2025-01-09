@@ -31,8 +31,8 @@ input_ids = torch.zeros( (1, max_seq_len), dtype=torch.int)
 input_ids[..., :] = 50283 # PAD
 seq = torch.tensor([50281,510,5347,273,6181,310,50284,15,50282], dtype=torch.int)
 input_ids[..., :seq.shape[-1]] = seq
-mask = torch.zeros((1,1,max_seq_len,max_seq_len))
-mask[:,:,seq.shape[-1]:,:] = -1e4
+mask = torch.zeros((1,max_seq_len,1,max_seq_len))
+mask[:,seq.shape[-1]:,:,:] = -1e4
 mask[:,:,:,seq.shape[-1]:] = -1e4
 
 output_name = "hidden_states" if isinstance(model, MaskedLMModel) else "logits"
